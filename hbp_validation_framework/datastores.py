@@ -25,7 +25,7 @@ try:
 except (NameError, ImportError):
     from urllib.request import urlretrieve  # Py3
     from urllib.parse import urlparse
-import mimetypes
+import magic
 import requests
 from hbp_service_client.storage_service.api import ApiClient
 
@@ -37,10 +37,9 @@ except ImportError:
 try:
     raw_input
 except NameError:  # Python 3
-    raw_input = input  
+    raw_input = input
 
-mimetypes.init()
-
+mime = magic.Magic(mime=True)
 
 class FileSystemDataStore(object):
     """
@@ -134,7 +133,7 @@ class CollabDataStore(object):
                 """
 
             name = name + os.path.basename(relative_path)
-            content_type = mimetypes.guess_type(local_path)[0]
+            content_type = mime.from_file(local_path)
             file_entity = self.doc_client.create_file(name, content_type, parent)
             etag = self.doc_client.upload_file_content(file_entity['uuid'],
                                                        source=local_path)
@@ -216,7 +215,7 @@ class CollabDataStore(object):
 
     def load_data(self, remote_path):
         content = self._download_data_content(remote_path)
-        content_type = mimetypes.guess_type(remote_path)[0]
+        content_type = mime.from_file(remote_path)
         if content_type == "application/json":
             return json.loads(content)
         else:
@@ -253,7 +252,7 @@ class HTTPDataStore(object):
         return local_paths
 
     def load_data(self, remote_path):
-        content_type, encoding = mimetypes.guess_type(remote_path)
+        content_type = mime.from_file(remote_path)
         if content_type == "application/json":
             return requests.get(remote_path).json()
         else:
@@ -275,7 +274,7 @@ class SwiftDataStore(object):
         except ImportError:
             print("Please install the following package: hbp_archive")
             return
-        
+
         print("----------------------------------------------------")
         print("NOTE: The target location is inside a CSCS container")
         print("----------------------------------------------------")
@@ -340,7 +339,7 @@ class SwiftDataStore(object):
     def load_data(self, remote_path, username=""):
         container, entity_path, pre_path = self.get_container(remote_path, username=username)
         content = container.read(entity_path)
-        content_type = mimetypes.guess_type(remote_path)[0]
+        content_type = mime.from_file(remote_path)
         if content_type == "application/json":
             return json.loads(content)
         else:

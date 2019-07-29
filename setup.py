@@ -23,7 +23,7 @@ setup(
     author='Andrew Davison and Shailesh Appukuttan',
     author_email='andrew.davison@unic.cnrs-gif.fr, shailesh.appukuttan@unic.cnrs-gif.fr',
     description='Python client for the HBP Validation Framework web services',
-    install_requires=['hbp-service-client', 'requests'],
+    install_requires=['hbp-service-client', 'requests', 'python-magic'],
     extras_require={'reports': ['fpdf', 'PyPDF2'],
                     'utils': ['sciunit']}
 )

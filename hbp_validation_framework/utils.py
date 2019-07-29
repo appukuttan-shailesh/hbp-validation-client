@@ -22,6 +22,7 @@ Display score matrix in web browser       :meth:`display_score_matrix_html`
 import os
 import uuid
 import json
+import yaml
 import pickle
 import webbrowser
 import argparse
@@ -223,13 +224,31 @@ def run_test_offline(model="", test_config_file="", reprozip=False):
 
     if reprozip:
         model_pickle_file = os.path.join(base_folder, "model__" + model.name + "__" + test_timestamp + ".pkl")
-        test_score_file = os.path.join(base_folder, "results", "score__" + model.name + "__" + test_timestamp + ".pkl")
         with open(model_pickle_file, 'wb') as file:
             pickle.dump(model, file)
 
-        subprocess.call(['reprozip', 'trace', '--overwrite', 'python', os.path.join(os.path.dirname(os.path.realpath(__file__)), 'runtest.py'), model_pickle_file, test_config_file, test_result_file])
+        subprocess.call(['reprozip', 'usage_report', '--disable'])
+        reprozip_basename = os.path.join(base_folder, ".reprozip__" + model.name + "__" + test_timestamp)
+        subprocess.call(['reprozip', 'trace', '-d', reprozip_basename, '--overwrite', \
+                         'python', os.path.join(os.path.dirname(os.path.realpath(__file__)), 'runtest.py'), model_pickle_file, test_config_file, test_result_file])
         if not os.path.isfile(test_result_file) :
             raise Exception("ERROR! Test result file has not been created.")
+
+        print("\nCreating ReproZip Package File...")
+        with open(os.path.join(reprozip_basename, "config.yml")) as f:
+            reprozip_config = yaml.load(f)
+        if "HBP_PASS" in reprozip_config["runs"][0]["environ"]:
+            del reprozip_config["runs"][0]["environ"]["HBP_PASS"]
+        if "CSCS_PASS" in reprozip_config["runs"][0]["environ"]:
+            del reprozip_config["runs"][0]["environ"]["CSCS_PASS"]
+        with open(os.path.join(reprozip_basename, "config.yml"), "w") as f:
+            yaml.dump(reprozip_config, f)
+        subprocess.call(['reprozip', 'pack', '-d', os.path.join(base_folder, ".reprozip__" + model.name + "__" + test_timestamp), reprozip_basename + ".rpz"])
+        with open(test_result_file, 'rb') as file:
+            score = pickle.load(file)
+        score.related_data["figures"].append(reprozip_basename + ".rpz")
+        with open(test_result_file, 'wb') as file:
+            pickle.dump(score, file)
     else:
         # Load the test info from config file
         with open(test_config_file) as file:
