@@ -16,13 +16,15 @@ import socket
 from importlib import import_module
 from pathlib import Path
 from urllib.error import URLError
-from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urljoin
 from urllib.request import urlopen
 
 import requests
 from requests.auth import AuthBase
 
+import sciunit
 import simplejson
+import collections
 
 from .datastores import URI_SCHEME_MAP
 
@@ -1414,6 +1416,7 @@ class ModelCatalog(BaseClient):
     Get valid attribute values             :meth:`get_attribute_options`
     Get model instance                     :meth:`get_model_instance`
     Download model instance                :meth:`download_model_instance`
+    Get BluePyOpt model instance class     :meth:`get_BPO_model`
     List model instances                   :meth:`list_model_instances`
     Add new model instance                 :meth:`add_model_instance`
     Find model instance; else add          :meth:`find_model_instance_else_add`
@@ -2052,6 +2055,7 @@ class ModelCatalog(BaseClient):
             fileList = datastore.download_data(str(model_source), local_directory=local_directory, overwrite=overwrite)
         elif model_source.startswith("https://object.cscs.ch/"):
             # ***** Handles CSCS public urls (file or folder) *****
+            model_source = urljoin(model_source, urlparse(model_source).path) # remove query params from URL, e.g. `?bluenaas=true`
             req = requests.head(model_source)
             if req.status_code == 200:
                 if "directory" in req.headers["Content-Type"]:
@@ -2085,6 +2089,82 @@ class ModelCatalog(BaseClient):
             print("\nSource location: {}".format(model_source))
             print("Could not download the specified file(s)!")
             return None
+
+    def get_BPO_model(self, instance_path="", instance_id="", model_id="", alias="", version="", local_directory=".", overwrite=False):
+        """Retrieve a specific BluePyOpt model instance as a Python class (sciunit.Model instance).
+
+        The desired BluePyOpt model instance can be specified 
+        in the following ways (in order of priority):
+
+        1. load from a local JSON file specified via `instance_path`
+        2. specify `instance_id` corresponding to model instance in model catalog
+        3. specify `model_id` and `version`
+        4. specify `alias` (of the model) and `version`
+
+        Parameters
+        ----------
+        instance_path : string
+            Location of local JSON file with model instance metadata.
+        instance_id : UUID
+            System generated unique identifier associated with model instance.
+        model_id : UUID
+            System generated unique identifier associated with model description.
+        alias : string
+            User-assigned unique identifier associated with model description.
+        version : string
+            User-assigned identifier (unique for each model) associated with model instance.
+        local_directory : string
+            Directory path (relative/absolute) where model instance files should be downloaded and saved. Default is current location.
+        overwrite: Boolean
+            Indicates if any existing file at the target location should be overwritten; default is set to False
+
+        Returns
+        -------
+        sciunit.Model
+            Returns a :class:`sciunit.Model` instance.
+
+        Note
+        ----
+        This method is for use exclusively with models produced via BluePyOpt.
+        For more info on BluePyOpt, please visit: https://github.com/BlueBrain/BluePyOpt
+
+        Examples
+        --------
+        >>> model = model_catalog.get_BPO_model(instance_id="a035f2b2-fe2e-42fd-82e2-4173a304263b")
+        """
+
+        try:
+            from zipfile import ZipFile
+        except ImportError:
+            print("Please install the following package: zipfile")
+            return
+
+        # get model instance info and metadata from source URL query parameter (`use_cell`)
+        model_inst_info = self.get_model_instance(instance_path=instance_path, instance_id=instance_id, model_id=model_id, alias=alias, version=version)
+        use_cell = parse_qs(urlparse(model_inst_info["source"]).query)["use_cell"][0]
+        # get model info such as name
+        model_info = self.get_model(model_id=model_inst_info["model_id"])
+
+        # download model source code; it will be a zip file for BluePyOpt models
+        file_path =  self.download_model_instance(instance_id=model_inst_info["id"], local_directory=local_directory, overwrite=overwrite)
+        file_path = file_path.decode("utf-8") # converting from bytes object to string
+        if file_path == None:
+            raise FileNotFoundError("Requested model could not be found: {}".format(model_source))
+
+        # extract the model zip file locally
+        try:
+            with ZipFile(file_path, 'r') as zipObj:
+                zipObj.extractall(local_directory)        
+            model_path = os.path.join(local_directory, os.path.basename(file_path).split(".")[0])
+        except Exception as e:
+            print("Unable to extract model zip file: {} -> {}".format(file_path, e))
+
+        # instantiate model using ModelLoader_BPO class
+        cell_model = ModelLoader_BPO(name=model_info["name"], model_dir=model_path, SomaSecList_name = "somatic", use_cell=use_cell)
+        cell_model.model_instance_uuid = model_inst_info["id"]
+        cell_model.model_uuid = model_info["id"]            # not essential; extra info
+        cell_model.model_version = model_inst_info["version"]     # not essential; extra info
+        return cell_model
 
     def list_model_instances(self, instance_path="", model_id="", alias=""):
         """Retrieve list of model instances belonging to a specified model.
@@ -2384,6 +2464,114 @@ class ModelCatalog(BaseClient):
             handle_response_error("Only SuperUser accounts can delete data", model_instance_json)
         elif model_instance_json.status_code != 200:
             handle_response_error("Error in deleting model instance", model_instance_json)
+
+
+class ModelLoader_BPO(sciunit.Model):
+    def __init__(self, name="model", model_dir=None, SomaSecList_name=None, use_cell=None):
+        """ Constructor. """
+        self.name = name
+        self.SomaSecList_name = SomaSecList_name
+        self.use_cell = use_cell
+
+        self.morph_full_path = None
+        self.find_section_lists = True
+
+        self.setup_dirs(model_dir)
+        self.setup_values()
+        self.compile_mod_files_BPO()
+
+    def compile_mod_files_BPO(self):
+
+        if self.modelpath is None:
+            raise Exception("Please give the path to the mod files (eg. model.modelpath = \"/home/models/CA1_pyr/mechanisms/\")")
+
+        if os.path.isfile(self.modelpath + self.libpath) is False:
+            os.system("cd " + self.modelpath + "; nrnivmodl")
+
+    def load_mod_files(self):
+
+        h.nrn_load_dll(str(self.modelpath + self.libpath))
+
+    def setup_dirs(self, model_dir=""):
+
+        base_path = os.path.join(model_dir, self.name)
+        if os.path.exists(base_path) or os.path.exists(base_path+".zip"):     # If the model_dir is the outer directory, that contains the zip
+            self.base_path = base_path
+            if not os.path.exists(self.base_path):
+                file_ref = zipfile.ZipFile(self.base_path+".zip", 'r')
+                file_ref.extractall(model_dir)
+                file_ref.close()
+        else:                                                                   # If model_dir is the inner directory (already unzipped)
+            self.base_path = model_dir
+            split_dir = model_dir.split('/')
+            del split_dir[-1]
+            outer_dir = '/'.join(split_dir)
+
+        self.morph_path = "\"" + self.base_path + "/morphology\""
+
+        for file_name in os.listdir(self.morph_path[1:-1]):
+            self.morph_full_path = self.morph_path[1:-1]+ '/' + file_name
+            break
+
+
+        # path to mod files
+        self.modelpath = self.base_path + "/mechanisms/"
+
+        # if this doesn't exist mod files are automatically compiled
+        self.libpath = "x86_64/.libs/libnrnmech.so.0"
+
+        self.hocpath = self.base_path + "/checkpoints/" + str(self.use_cell)
+
+        if not os.path.exists(self.hocpath):
+            self.hocpath = None
+            for file in os.listdir(self.base_path + "/checkpoints/"):
+                if file.startswith("cell") and file.endswith(".hoc"):
+                    self.hocpath = self.base_path + "/checkpoints/" + file
+                    print("Model = " + self.name + ": cell.hoc not found in /checkpoints; using " + file)
+                    break
+            if not os.path.exists(self.hocpath):
+                raise IOError("No appropriate .hoc file found in /checkpoints")
+
+        self.base_directory = self.base_path +'/validation_results/'
+
+    def setup_values(self):
+
+        # get model template name
+        # could also do this via other JSON, but morph.json seems dedicated for template info
+        with open(os.path.join(self.base_path, "config", "morph.json")) as morph_file:
+            template_name = list(json.load(morph_file, object_pairs_hook=collections.OrderedDict).keys())[0]
+
+        self.template_name = template_name + "(" + self.morph_path+")"
+
+        # access model config info
+        with open(os.path.join(self.base_path, "config", "parameters.json")) as params_file:
+            params_data = json.load(params_file, object_pairs_hook=collections.OrderedDict)
+
+        # extract v_init and celsius (if available)
+        v_init = None
+        celsius = None
+        try:
+            for item in params_data[template_name]["fixed"]["global"]:
+                # would have been better if info was stored inside a dict (rather than a list)
+                if "v_init" in item:
+                    item.remove("v_init")
+                    v_init = float(item[0])
+                if "celsius" in item:
+                    item.remove("celsius")
+                    celsius = float(item[0])
+        except:
+            pass
+        if v_init == None:
+            self.v_init = -70.0
+            print("Could not find model specific info for `v_init`; using default value of {} mV".format(str(self.v_init)))
+        else:
+            self.v_init = v_init
+        if celsius == None:
+            self.celsius = 34.0
+            print("Could not find model specific info for `celsius`; using default value of {} degrees Celsius".format(str(self.celsius)))
+        else:
+            self.celsius = celsius
+        self.trunk_origin = [0.5]
 
 
 def _have_internet_connection():
