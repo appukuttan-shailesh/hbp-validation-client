@@ -2090,7 +2090,7 @@ class ModelCatalog(BaseClient):
             print("Could not download the specified file(s)!")
             return None
 
-    def get_BPO_model(self, instance_path="", instance_id="", model_id="", alias="", version="", local_directory=".", overwrite=False):
+    def get_BPO_model(self, instance_path="", instance_id="", model_id="", alias="", version="", local_directory=".", overwrite=False, list_req_caps=[]):
         """Retrieve a specific BluePyOpt model instance as a Python class (sciunit.Model instance).
 
         The desired BluePyOpt model instance can be specified 
@@ -2117,6 +2117,8 @@ class ModelCatalog(BaseClient):
             Directory path (relative/absolute) where model instance files should be downloaded and saved. Default is current location.
         overwrite: Boolean
             Indicates if any existing file at the target location should be overwritten; default is set to False
+        list_req_caps: list
+            List of capabilities that should be sub-classed by the model instance
 
         Returns
         -------
@@ -2160,9 +2162,18 @@ class ModelCatalog(BaseClient):
             print("Unable to extract model zip file: {} -> {}".format(file_path, e))
 
         # instantiate model using ModelLoader_BPO class
-        cell_model = ModelLoader_BPO(name=model_info["name"], model_dir=model_path, SomaSecList_name = "somatic", use_cell=use_cell)
+        ModelLoader_BPO_Class = get_BPO_Model_WithCapabilities(list_req_caps=list_req_caps, name="dummy", model_dir=model_path, SomaSecList_name = "somatic", use_cell=use_cell)
+        cell_model = ModelLoader_BPO_Class()
+
+        # # needed to overcome issue with pickling local classes
+        # for more, see: https://stackoverflow.com/a/16281779/7383605
+        cell_model.__class__ = ModelLoader_BPO
+        # above class does not have any of the specified capabilities, so we need to add those here
+        # for more, see: https://stackoverflow.com/q/7408216/7383605
+        cell_model.__class__.__bases__ = cell_model.__class__.__bases__ + tuple(list_req_caps)
+        
         cell_model.model_instance_uuid = model_inst_info["id"]
-        cell_model.model_uuid = model_info["id"]            # not essential; extra info
+        cell_model.model_uuid = model_info["id"]                  # not essential; extra info
         cell_model.model_version = model_inst_info["version"]     # not essential; extra info
         return cell_model
 
@@ -2466,112 +2477,127 @@ class ModelCatalog(BaseClient):
             handle_response_error("Error in deleting model instance", model_instance_json)
 
 
-class ModelLoader_BPO(sciunit.Model):
-    def __init__(self, name="model", model_dir=None, SomaSecList_name=None, use_cell=None):
-        """ Constructor. """
-        self.name = name
-        self.SomaSecList_name = SomaSecList_name
-        self.use_cell = use_cell
+def get_BPO_Model_WithCapabilities(list_req_caps=[], name="model", model_dir=None, SomaSecList_name=None, use_cell=None):
+    class ModelLoader_BPO(sciunit.Model, *list_req_caps):
+        def __init__(self, name=name, model_dir=model_dir, SomaSecList_name=SomaSecList_name, use_cell=use_cell):
+            """ Constructor. """
+            self.name = name
+            self.SomaSecList_name = SomaSecList_name
+            self.use_cell = use_cell
 
-        self.morph_full_path = None
-        self.find_section_lists = True
+            self.morph_full_path = None
+            self.find_section_lists = True
 
-        self.setup_dirs(model_dir)
-        self.setup_values()
-        self.compile_mod_files_BPO()
+            self.setup_dirs(model_dir)
+            self.setup_values()
+            self.compile_mod_files_BPO()
 
-    def compile_mod_files_BPO(self):
+            if not use_cell:
+                raise Exception("`use_cell` parameter is not specified for this BluePyOpt model. Cannot proceed!")
 
-        if self.modelpath is None:
-            raise Exception("Please give the path to the mod files (eg. model.modelpath = \"/home/models/CA1_pyr/mechanisms/\")")
+        def compile_mod_files_BPO(self):
 
-        if os.path.isfile(self.modelpath + self.libpath) is False:
-            os.system("cd " + self.modelpath + "; nrnivmodl")
+            if self.modelpath is None:
+                raise Exception("Please give the path to the mod files (eg. model.modelpath = \"/home/models/CA1_pyr/mechanisms/\")")
 
-    def load_mod_files(self):
+            if os.path.isfile(self.modelpath + self.libpath) is False:
+                os.system("cd " + self.modelpath + "; nrnivmodl")
 
-        h.nrn_load_dll(str(self.modelpath + self.libpath))
+        def load_mod_files(self):
 
-    def setup_dirs(self, model_dir=""):
+            h.nrn_load_dll(str(self.modelpath + self.libpath))
 
-        base_path = os.path.join(model_dir, self.name)
-        if os.path.exists(base_path) or os.path.exists(base_path+".zip"):     # If the model_dir is the outer directory, that contains the zip
-            self.base_path = base_path
-            if not os.path.exists(self.base_path):
-                file_ref = zipfile.ZipFile(self.base_path+".zip", 'r')
-                file_ref.extractall(model_dir)
-                file_ref.close()
-        else:                                                                   # If model_dir is the inner directory (already unzipped)
-            self.base_path = model_dir
-            split_dir = model_dir.split('/')
-            del split_dir[-1]
-            outer_dir = '/'.join(split_dir)
+        def setup_dirs(self, model_dir=""):
 
-        self.morph_path = "\"" + self.base_path + "/morphology\""
+            base_path = os.path.join(model_dir, self.name)
+            if os.path.exists(base_path) or os.path.exists(base_path+".zip"):     # If the model_dir is the outer directory, that contains the zip
+                self.base_path = base_path
+                if not os.path.exists(self.base_path):
+                    file_ref = zipfile.ZipFile(self.base_path+".zip", 'r')
+                    file_ref.extractall(model_dir)
+                    file_ref.close()
+            else:                                                                   # If model_dir is the inner directory (already unzipped)
+                self.base_path = model_dir
+                split_dir = model_dir.split('/')
+                del split_dir[-1]
+                outer_dir = '/'.join(split_dir)
 
-        for file_name in os.listdir(self.morph_path[1:-1]):
-            self.morph_full_path = self.morph_path[1:-1]+ '/' + file_name
-            break
+            self.morph_path = "\"" + self.base_path + "/morphology\""
+
+            for file_name in os.listdir(self.morph_path[1:-1]):
+                self.morph_full_path = self.morph_path[1:-1]+ '/' + file_name
+                break
 
 
-        # path to mod files
-        self.modelpath = self.base_path + "/mechanisms/"
+            # path to mod files
+            self.modelpath = self.base_path + "/mechanisms/"
 
-        # if this doesn't exist mod files are automatically compiled
-        self.libpath = "x86_64/.libs/libnrnmech.so.0"
+            # if this doesn't exist mod files are automatically compiled
+            self.libpath = "x86_64/.libs/libnrnmech.so.0"
 
-        self.hocpath = self.base_path + "/checkpoints/" + str(self.use_cell)
+            self.hocpath = self.base_path + "/checkpoints/" + str(self.use_cell)
 
-        if not os.path.exists(self.hocpath):
-            self.hocpath = None
-            for file in os.listdir(self.base_path + "/checkpoints/"):
-                if file.startswith("cell") and file.endswith(".hoc"):
-                    self.hocpath = self.base_path + "/checkpoints/" + file
-                    print("Model = " + self.name + ": cell.hoc not found in /checkpoints; using " + file)
-                    break
             if not os.path.exists(self.hocpath):
-                raise IOError("No appropriate .hoc file found in /checkpoints")
+                self.hocpath = None
+                for file in os.listdir(self.base_path + "/checkpoints/"):
+                    if file.startswith("cell") and file.endswith(".hoc"):
+                        self.hocpath = self.base_path + "/checkpoints/" + file
+                        print("Model = " + self.name + ": cell.hoc not found in /checkpoints; using " + file)
+                        break
+                if not os.path.exists(self.hocpath):
+                    raise IOError("No appropriate .hoc file found in /checkpoints")
 
-        self.base_directory = self.base_path +'/validation_results/'
+            self.base_directory = self.base_path +'/validation_results/'
 
-    def setup_values(self):
+        def setup_values(self):
 
-        # get model template name
-        # could also do this via other JSON, but morph.json seems dedicated for template info
-        with open(os.path.join(self.base_path, "config", "morph.json")) as morph_file:
-            template_name = list(json.load(morph_file, object_pairs_hook=collections.OrderedDict).keys())[0]
+            # get model template name
+            # could also do this via other JSON, but morph.json seems dedicated for template info
+            with open(os.path.join(self.base_path, "config", "morph.json")) as morph_file:
+                template_name = list(json.load(morph_file, object_pairs_hook=collections.OrderedDict).keys())[0]
 
-        self.template_name = template_name + "(" + self.morph_path+")"
+            self.template_name = template_name + "(" + self.morph_path+")"
 
-        # access model config info
-        with open(os.path.join(self.base_path, "config", "parameters.json")) as params_file:
-            params_data = json.load(params_file, object_pairs_hook=collections.OrderedDict)
+            # access model config info
+            with open(os.path.join(self.base_path, "config", "parameters.json")) as params_file:
+                params_data = json.load(params_file, object_pairs_hook=collections.OrderedDict)
 
-        # extract v_init and celsius (if available)
-        v_init = None
-        celsius = None
-        try:
-            for item in params_data[template_name]["fixed"]["global"]:
-                # would have been better if info was stored inside a dict (rather than a list)
-                if "v_init" in item:
-                    item.remove("v_init")
-                    v_init = float(item[0])
-                if "celsius" in item:
-                    item.remove("celsius")
-                    celsius = float(item[0])
-        except:
-            pass
-        if v_init == None:
-            self.v_init = -70.0
-            print("Could not find model specific info for `v_init`; using default value of {} mV".format(str(self.v_init)))
-        else:
-            self.v_init = v_init
-        if celsius == None:
-            self.celsius = 34.0
-            print("Could not find model specific info for `celsius`; using default value of {} degrees Celsius".format(str(self.celsius)))
-        else:
-            self.celsius = celsius
-        self.trunk_origin = [0.5]
+            # extract v_init and celsius (if available)
+            v_init = None
+            celsius = None
+            try:
+                for item in params_data[template_name]["fixed"]["global"]:
+                    # would have been better if info was stored inside a dict (rather than a list)
+                    if "v_init" in item:
+                        item.remove("v_init")
+                        v_init = float(item[0])
+                    if "celsius" in item:
+                        item.remove("celsius")
+                        celsius = float(item[0])
+            except:
+                pass
+            if v_init == None:
+                self.v_init = -70.0
+                print("Could not find model specific info for `v_init`; using default value of {} mV".format(str(self.v_init)))
+            else:
+                self.v_init = v_init
+            if celsius == None:
+                self.celsius = 34.0
+                print("Could not find model specific info for `celsius`; using default value of {} degrees Celsius".format(str(self.celsius)))
+            else:
+                self.celsius = celsius
+            self.trunk_origin = [0.5]
+    
+    # needed to overcome issue with pickling local classes
+    # for more, see: https://stackoverflow.com/a/52892359/7383605
+    ModelLoader_BPO.__name__ = "ModelLoader_BPO" 
+    ModelLoader_BPO.__qualname__ = "ModelLoader_BPO" 
+    return ModelLoader_BPO
+
+
+# needed to overcome issue with pickling local classes
+# for more, see: https://stackoverflow.com/a/52892359/7383605
+ModelLoader_BPO = get_BPO_Model_WithCapabilities()
 
 
 def _have_internet_connection():
