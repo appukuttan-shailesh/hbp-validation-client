@@ -320,14 +320,15 @@ def upload_test_result(username="", password=None, environment="production", tes
     >>> result_id, score = utils.upload_test_result(username="shailesh", test_result_file=test_result_file)
     """
 
-    if not register_result:
-        return None, None
     if not os.path.isfile(test_result_file) :
         raise Exception("'test_result_file' should direct to file containg the test result data.")
 
     # Load result info from file
     with open(test_result_file, 'rb') as file:
         score = pickle.load(file)
+
+    if not register_result:
+        return None, score
 
     # Register the result with the HBP validation framework
     if client_obj:
